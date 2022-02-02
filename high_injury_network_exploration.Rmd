@@ -1,0 +1,136 @@
+---
+title: "Untitled"
+description: |
+  A new article created using the Distill format.
+author:
+  - name: Nora Jones 
+    url: https://example.com/norajones
+    affiliation: Spacely Sprockets
+    affiliation_url: https://example.com/spacelysprokets
+date: "`r Sys.Date()`"
+output: distill::distill_article
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(sf)
+library(tmap)
+library(readxl)
+```
+
+```{r}
+read_sheets <- function(sheet){
+  read_excel("data/COM_HIN_EPDO.xlsx", sheet = sheet)
+}
+
+df <- read_sheets(1)
+df2 <- read_excel("data/COM_HIN_EPDO.xlsx", sheet = 2, skip = 1) %>% 
+  janitor::clean_names()
+df3 <- read_sheets(3)
+df4 <- read_sheets(4)
+
+st_layers("C:/Users/user1/Downloads/COM_HIN.gdb")
+network <- st_read("C:/Users/user1/Downloads/COM_HIN.gdb", layer = "SEG_SpatialJoin")
+
+
+tmap_mode("view")
+
+network %>% 
+  filter(INT_Join_csv_CAT_ALL == "IV") %>% 
+tm_shape() +
+  tm_lines(col = "red")
+
+
+
+
+
+df2 %>% 
+  filter(cat_all == "IV" & traffic_con == "Yield")
+```
+
+To calculate the thresholds, the spreadsheet uses the NORM.INV(G$1,$D2,$E2): "The term inverse normal distribution refers to the method of using a known probability to find the corresponding z-critical value in a normal distribution." I don't actually think this is appropriate, as the the EPDO data are very much not normally distributed, and also because I believe the point of the inverse normal distribution is to establish significance levels. 
+
+To reproduce what they're doing, we can use the following code (example for mid-block locations only)
+```{r}
+df2 %>% 
+  filter(te_location == "MidBlk") %>% 
+  group_by(te_location, rd_code) %>% 
+  summarize(mean = mean(epdo_all), sd = sd(epdo_all), qn_75 = qnorm(.75, mean = mean, sd = sd)) %>% 
+  arrange(rd_code)
+```
+
+In his email, Boris pointed out that in the end, they used a 65% threshold rather than the 75% in the spreadsheet. So we'll calculate that too.
+
+```{r}
+df2 %>% 
+  filter(te_location == "MidBlk") %>% 
+  group_by(te_location, rd_code) %>% 
+  summarize(mean = mean(epdo_all), sd = sd(epdo_all), qn_75 = qnorm(.75, mean = mean, sd = sd), qn_65 = qnorm(.65, mean = mean, sd = sd)) %>% 
+  arrange(rd_code)
+```
+
+Let's see if the geodatabase provided uses the 65 or 75 threshold (or something else). First, we figure out how many segments fall above the category in the spreadsheet.
+
+```{r}
+df2 %>% 
+  filter(cat_all == "IV") %>% 
+  summarize(n())
+
+network %>% 
+  st_drop_geometry() %>% 
+  filter(INT_Join_csv_CAT_ALL == "IV") %>% 
+  summarise(n())
+```
+So the network has way more segments with a `cat_all` value of `IV`. 
+
+
+Maybe a useful thing for now would.
+
+```{r}
+colnames(network)
+
+network %>% 
+  select(PolyCode, starts_with("INT_Join")) %>% 
+  filter(!is.na(INT_Join_csv_PolyCode))
+```
+
+We see that the PolyCode and INT_Join_csv_PolyCode variables are not the same. Sometimes their values are identical, sometimes they are not. Maybe this indicates spatial matching. I think I may just have to install ArcGIS and open the project file to understand what's going on. 
+
+Installed ArcGIS Pro trial and opened the project file. So it seems like the data in there produce a map that is not what was shown at TC. For example
+
+Instead of using the high injury category, let's use total EPDO to color the segments:
+
+```{r}
+network %>% 
+tm_shape() +
+  tm_lines(col = "INT_Join_csv_EPDO_ALL", style = "jenks")
+```
+
+Let's start with an explanation of how the final map was created: First, you separate the road network into mid-block and intersection segments. Then you match crash data to those segments. Calculate the EPDO for every segment. Group segments by their type (for mid-block segments: by functional class such as arterial, county highway, etc.; for intersections: by control type). Within each of these groups, calculate EPDO thresholds and classify into 4 classes. Take the highest class as the high injury network.
+
+As a result of the grouping by type, segments with vastly different EPDOs are classified as high injury. For certain segments, a segment that has 0 fatal or serious crashes may still show up on the high injury network. 
+
+First, a map of just EPDO values:
+
+```{r}
+network %>% 
+tm_shape() +
+  tm_lines(col = "INT_Join_csv_EPDO_ALL", style = "jenks")
+```
+
+Next, a map of segments classified as HIN but with 0 serious or fatal crashes (K, A type):
+
+```{r}
+network_filtered <- network %>% 
+  left_join(df2, by = c("INT_Join_csv_PolyCode" = "poly_code"))
+tmap_mode("view")
+network_filtered %>% 
+  filter(INT_Join_csv_CAT_ALL == "IV" & (ped_k == 0 & ped_a == 0 & bike_k == 0 & bike_a == 0 & veh_a == 0 & veh_k == 0)) %>% 
+  tm_shape() + 
+  tm_lines()
+```
+I did a quick quality check with Community Maps crash data and this appears to be right. 
